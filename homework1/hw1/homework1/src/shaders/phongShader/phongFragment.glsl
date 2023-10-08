@@ -107,7 +107,7 @@ float PCSS(sampler2D shadowMap, vec4 coords){
 float useShadowMap(sampler2D shadowMap, vec4 shadowCoord){
   float shadowDepth = unpack(texture2D(shadowMap, shadowCoord.xy));
   float currentDepth = shadowCoord.z;
-
+  // add bias to solve self occulusion
   if (currentDepth > shadowDepth + EPS) {
     return 0.0;
   }
