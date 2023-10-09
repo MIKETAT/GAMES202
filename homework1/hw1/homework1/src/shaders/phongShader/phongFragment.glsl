@@ -72,7 +72,7 @@ void uniformDiskSamples( const in vec2 randomSeed ) {
   float angle = sampleX * PI2;
   float radius = sqrt(sampleY);
 
-  for( int i = 0; i < NUM_SAMPLES; i ++ ) {
+  for ( int i = 0; i < NUM_SAMPLES; i ++ ) {
     poissonDisk[i] = vec2( radius * cos(angle) , radius * sin(angle)  );
 
     sampleX = rand_1to1( sampleY ) ;
@@ -87,8 +87,44 @@ float findBlocker( sampler2D shadowMap,  vec2 uv, float zReceiver ) {
 	return 1.0;
 }
 
+// 软阴影/阴影抗锯齿
 float PCF(sampler2D shadowMap, vec4 coords) {
-  return 1.0;
+  // 当前深度
+  float currentDepth = coords.z;
+
+  // 生成 poissonDisk
+  vec2 randomSeed = vec2(rand_2to1(coords.xy), rand_2to1(coords.zw));
+  poissonDiskSamples(coords.xy);
+
+  /*
+  texture2d(shadowMap, coords)  coords的坐标范围是 [0, 1] 这是自然，纹理坐标嘛 
+  因此这里要做的采样就是在 投影空间坐标 -> shadowMap上的纹理坐标 + 随机的偏置
+  重复一定次数，求出平均的visibility
+  那我们的偏置应当是多少呢，已知纹理坐标范围是[0, 1], poissonDisk[i]的范围也是[0, 1]
+  我们需要的就是一个filterSize, 这个filterSize * poissonDisk[i] + coords 就是最终在shadowMap上采样的坐标
+  网上的做法是，定义 stride 和 shadowMapSize, 我的理解没错的话,
+  filterSize = stride / shadowMapSize, 也就是 (10, 100) 与 (1, 10） 无异
+  */
+  
+  //PCF的逻辑,采样ShadowMap上的若干点,得到深度与当前深度比较,得到[0, 1]的visibility
+  float visibility = 0.;
+  //float stride = 32.;
+  //float shadowMapSize = 2048.;
+  float filterSize = 0.001;
+
+  for (int i = 0; i < PCF_NUM_SAMPLES; i++) {
+    // 本次采样坐标
+    vec2 sampleCoords = poissonDisk[i] * filterSize + coords.xy;
+
+    // 获取本次采样得到的深度值
+    float shadowDepth = unpack(texture2D(shadowMap, sampleCoords));
+  
+    // 统计本次的visibility, 加上bias
+    if (currentDepth < shadowDepth + EPS) {
+      visibility = visibility + 1.;
+    }
+  }
+  return visibility / float(PCF_NUM_SAMPLES);
 }
 
 float PCSS(sampler2D shadowMap, vec4 coords){
@@ -137,13 +173,15 @@ vec3 blinnPhong() {
 }
 
 void main(void) {
-  // 归一化， vPositionFromLight 是经过 light MVP 变化后的坐标
+  // 归一化， vPositionFromLight 是经过 light MVP 变化后的坐标, (light MVP 正交投影后变换到 [-1, 1]^3 空间中)
   vec3 shadowCoord = vPositionFromLight.xyz / vPositionFromLight.w;
+  
+  // [-1, 1]^3 -> [0, 1]^3
   shadowCoord.xyz = (shadowCoord.xyz + 1.0) / 2.0;
 
   float visibility;
-  visibility = useShadowMap(uShadowMap, vec4(shadowCoord, 1.0));
-  //visibility = PCF(uShadowMap, vec4(shadowCoord, 1.0));
+  //visibility = useShadowMap(uShadowMap, vec4(shadowCoord, 1.0));
+  visibility = PCF(uShadowMap, vec4(shadowCoord, 1.0));
   //visibility = PCSS(uShadowMap, vec4(shadowCoord, 1.0));
 
   vec3 phongColor = blinnPhong();
