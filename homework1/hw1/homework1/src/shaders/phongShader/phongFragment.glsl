@@ -23,6 +23,8 @@ varying highp vec3 vNormal;
 #define EPS 1e-3
 #define PI 3.141592653589793
 #define PI2 6.283185307179586
+#define BLOCKER_FILTER_SIZE 0.02
+#define LIGHT_WEIGHT 0.1
 
 uniform sampler2D uShadowMap;
 
@@ -72,7 +74,7 @@ void uniformDiskSamples( const in vec2 randomSeed ) {
   float angle = sampleX * PI2;
   float radius = sqrt(sampleY);
 
-  for ( int i = 0; i < NUM_SAMPLES; i ++ ) {
+  for( int i = 0; i < NUM_SAMPLES; i ++ ) {
     poissonDisk[i] = vec2( radius * cos(angle) , radius * sin(angle)  );
 
     sampleX = rand_1to1( sampleY ) ;
@@ -84,17 +86,27 @@ void uniformDiskSamples( const in vec2 randomSeed ) {
 }
 
 float findBlocker( sampler2D shadowMap,  vec2 uv, float zReceiver ) {
-	return 1.0;
+  // 查找遮挡物的平均深度，通过相似计算出filterSize，用于PCSS第三步的采样
+  float totalDepth = 0.;
+  int numOfBlocker = 0;
+  for (int i = 0; i < BLOCKER_SEARCH_NUM_SAMPLES; i++) {
+    vec2 sample_coord = uv + poissonDisk[i] * BLOCKER_FILTER_SIZE;
+    float sampleDepth = unpack(texture2D(shadowMap, sample_coord));
+    if (sampleDepth + EPS < zReceiver) {
+      totalDepth = totalDepth + sampleDepth;
+      numOfBlocker++;
+    }
+  }
+  if (numOfBlocker == 0) {
+    return 1.;
+  }
+	return totalDepth / float(numOfBlocker);
 }
 
 // 软阴影/阴影抗锯齿
 float PCF(sampler2D shadowMap, vec4 coords) {
   // 当前深度
   float currentDepth = coords.z;
-
-  // 生成 poissonDisk
-  vec2 randomSeed = vec2(rand_2to1(coords.xy), rand_2to1(coords.zw));
-  poissonDiskSamples(coords.xy);
 
   /*
   texture2d(shadowMap, coords)  coords的坐标范围是 [0, 1] 这是自然，纹理坐标嘛 
@@ -104,13 +116,14 @@ float PCF(sampler2D shadowMap, vec4 coords) {
   我们需要的就是一个filterSize, 这个filterSize * poissonDisk[i] + coords 就是最终在shadowMap上采样的坐标
   网上的做法是，定义 stride 和 shadowMapSize, 我的理解没错的话,
   filterSize = stride / shadowMapSize, 也就是 (10, 100) 与 (1, 10） 无异
+  // 更新: 但是 stride / shadowMapSize 的写法更能感受filterSize的大小，例如 16 / 1024， 在 1024*1024的纹理上采样周围16*16个点
   */
   
   //PCF的逻辑,采样ShadowMap上的若干点,得到深度与当前深度比较,得到[0, 1]的visibility
   float visibility = 0.;
   //float stride = 32.;
   //float shadowMapSize = 2048.;
-  float filterSize = 0.001;
+  float filterSize = 16. / 1024.;
 
   for (int i = 0; i < PCF_NUM_SAMPLES; i++) {
     // 本次采样坐标
@@ -127,16 +140,32 @@ float PCF(sampler2D shadowMap, vec4 coords) {
   return visibility / float(PCF_NUM_SAMPLES);
 }
 
-float PCSS(sampler2D shadowMap, vec4 coords){
 
-  // STEP 1: avgblocker depth
-
-  // STEP 2: penumbra size
-
-  // STEP 3: filtering
+float PCSS(sampler2D shadowMap, vec4 coords) {
+  float filterSize = 32. / 2048.;
+  float zReceiver = coords.z;
   
-  return 1.0;
+  // STEP 1: avgblocker depth
+  float blockerDepth = findBlocker(shadowMap, coords.xy, zReceiver);
+  
+  // STEP 2: penumbra size
+  float W_Pebumbra = float(LIGHT_WEIGHT) * (zReceiver - blockerDepth) / blockerDepth;
+  
+  // STEP 3: filtering
+  float visibility = 0.;
+  for (int i = 0; i < PCF_NUM_SAMPLES; i++) {
+    // 本次采样坐标
+    vec2 sampleCoords = poissonDisk[i] * filterSize * W_Pebumbra + coords.xy;
 
+    // 获取本次采样得到的深度值
+    float shadowDepth = unpack(texture2D(shadowMap, sampleCoords));
+  
+    // 统计本次的visibility, 加上bias
+    if (zReceiver < shadowDepth + EPS) {
+      visibility = visibility + 1.;
+    }
+  }
+  return visibility / float(PCF_NUM_SAMPLES);
 }
 
 
@@ -179,10 +208,14 @@ void main(void) {
   // [-1, 1]^3 -> [0, 1]^3
   shadowCoord.xyz = (shadowCoord.xyz + 1.0) / 2.0;
 
+  // 生成 poissonDisk
+  //vec2 randomSeed = vec2(rand_2to1(shadowCoord.xy), rand_2to1(shadowCoord.xy));
+  poissonDiskSamples(shadowCoord.xy);
+
   float visibility;
   //visibility = useShadowMap(uShadowMap, vec4(shadowCoord, 1.0));
-  visibility = PCF(uShadowMap, vec4(shadowCoord, 1.0));
-  //visibility = PCSS(uShadowMap, vec4(shadowCoord, 1.0));
+  //visibility = PCF(uShadowMap, vec4(shadowCoord, 1.0));
+  visibility = PCSS(uShadowMap, vec4(shadowCoord, 1.0));
 
   vec3 phongColor = blinnPhong();
 
